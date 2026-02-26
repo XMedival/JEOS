@@ -1,7 +1,7 @@
 #include "../include/syscall.h"
 #include "../include/ulib.h"
 
-static char buf[1024];
+static char buf;
 
 void _start() {
 
@@ -9,10 +9,10 @@ void _start() {
 
     int fd = open("/dev/cons", O_RDONLY);
 
-    while (1) {
-        int n = read(fd, buf, sizeof(buf) - 1);
+    for (;;) {
+        int n = read(fd, &buf, 1);
         if (n > 0) {
-            write(1, buf, n);
+            write(1, &buf, 1);
         }
     }
     _exit(1);

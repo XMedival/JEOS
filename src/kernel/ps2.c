@@ -97,42 +97,82 @@ static void kbd_put_rune(u32 rune) {
     ring_write(&kbd_ring_buf, buf, n);
 }
 
-static void kbd_handle_scancode(u8 scancode) {
-    u8 key = scancode & 0x7F;
-    int release = scancode & 0x80;
+static int is_alpha_rune(u32 r) {
+    return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z');
+}
 
-    // Handle modifiers
-    if (modifier_scancodes[key]) {
-        if (release) {
-            kbd_modifiers &= ~modifier_scancodes[key];
-        } else {
-            kbd_modifiers |= modifier_scancodes[key];
+static void kbd_handle_scancode(u8 scancode)
+{
+    static u8 e0 = 0;
+
+    if (scancode == 0xE0) { e0 = 1; return; }
+
+    u8 key = scancode & 0x7F;
+    int release = (scancode & 0x80) != 0;
+
+    // E0-modifiery (right ctrl/alt)
+    if (e0) {
+        e0 = 0;
+        if (key == 0x1D) { // Right Ctrl
+            if (release) kbd_modifiers &= ~KBD_MOD_CTRL;
+            else         kbd_modifiers |=  KBD_MOD_CTRL;
+            return;
         }
+        if (key == 0x38) { // Right Alt
+            if (release) kbd_modifiers &= ~KBD_MOD_ALT;
+            else         kbd_modifiers |=  KBD_MOD_ALT;
+            return;
+        }
+        if (release) return;
+        return; // inne E0 klawisze na razie ignor
+    }
+
+    // CapsLock: toggle na press, release ignoruj
+    if (key == 0x3A) {
+        if (!release) kbd_modifiers ^= KBD_MOD_CAPS;
+        return;
+    }
+
+    // Normalne modifiery z tabeli (Shift/Ctrl/Alt left)
+    if (modifier_scancodes[key]) {
+        if (release) kbd_modifiers &= ~modifier_scancodes[key];
+        else         kbd_modifiers |=  modifier_scancodes[key];
         return;
     }
 
     if (release) return;
 
-    // Get rune
-    u32 rune = 0;
-    int use_shift = (kbd_modifiers & (KBD_MOD_SHIFT | KBD_MOD_CAPS));
-    
-    if (key < 128) {
-        if (use_shift && scancode_to_rune_shift[key]) {
-            rune = scancode_to_rune_shift[key];
-        } else {
-            rune = scancode_to_rune[key];
-        }
+    // Rune
+    u32 base = scancode_to_rune[key];
+    u32 shifted = scancode_to_rune_shift[key];
+
+    int shift = (kbd_modifiers & KBD_MOD_SHIFT) != 0;
+    int caps  = (kbd_modifiers & KBD_MOD_CAPS)  != 0;
+
+    u32 rune = base;
+    if ((base >= 'a' && base <= 'z') || (base >= 'A' && base <= 'Z')) {
+        if (shift ^ caps) rune = shifted ? shifted : base;
+        else rune = base;
+    } else {
+        if (shift && shifted) rune = shifted;
+        else rune = base;
     }
 
-    if (rune) {
-        kbd_put_rune(rune);
-    }
+    if (rune) kbd_put_rune(rune);
 }
 
-void kbd_interrupt(void) {
-    u8 scancode = inb(PS2_DATA_PORT);
-    kbd_handle_scancode(scancode);
+void kbd_interrupt(void)
+{
+    // Opróżnij bufor wyjściowy kontrolera: PS/2 może mieć kilka bajtów na jedno IRQ.
+    for (int i = 0; i < 32; i++) {
+        u8 st = inb(PS2_STATUS_PORT);
+        if (!(st & PS2_STATUS_OUTPUT_FULL))
+            break;
+
+        // Jeśli kiedyś rozdzielisz mysz/klawę tym samym portem, tu można filtrować AUX.
+        u8 scancode = inb(PS2_DATA_PORT);
+        kbd_handle_scancode(scancode);
+    }
 }
 
 static void puti(char *buf, int val) {
