@@ -314,7 +314,7 @@ struct proc *proc_create(const char *path)
     p->state = PROC_RUNNABLE;
     release(&proc_lock);
 
-    klog_ok("PROC", "pid %u  '%s'  entry=%p", p->pid, p->name, (void*)entry);
+    // klog_ok("PROC", "pid %u  '%s'  entry=%p", p->pid, p->name, (void*)entry);
     return p;
 }
 
@@ -478,6 +478,7 @@ void yield(void)
     if (!p) return;
     acquire(&proc_lock);
     p->state = PROC_RUNNABLE;
+    c->proc = NULL;
     swtch(&p->context, c->scheduler_ctx);
     release(&proc_lock);
 }

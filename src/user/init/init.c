@@ -14,6 +14,7 @@ void _start() {
         } else if (pid > 0) {
             int status;
             wait(&status);
+            write(1, "WAIT\n", 5);
         } else {
             write(1, "BIG OOPS\n", 9);
             _exit(1);

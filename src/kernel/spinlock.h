@@ -19,6 +19,10 @@ struct cpu {
   u8 cpu_id;         // index into cpus[]
 };
 
+_Static_assert(offsetof(struct cpu, kernel_rsp) == 0, "cpu.kernel_rsp offset");
+_Static_assert(offsetof(struct cpu, scratch_rsp) == 8, "cpu.scratch_rsp offset");
+_Static_assert(offsetof(struct cpu, proc) == 16, "cpu.proc offset");
+
 struct spinlock {
   u8 locked;
   char *name;

@@ -2,9 +2,11 @@
 #include "gdt.h"
 #include "kconsole.h"
 #include "mem.h"
+#include "panic.h"
 #include "pipe.h"
 #include "print.h"
 #include "proc.h"
+#include "spinlock.h"
 #include "vfs.h"
 #include "x86.h"
 
@@ -28,13 +30,21 @@ static int valid_user_ptr(const void *p) { return (u64)p < USER_PTR_MAX; }
 /* ---- syscall implementations ---- */
 
 static void sys_exit(i32 status) {
-    struct proc *p = mycpu()->proc;
+    struct cpu *c = mycpu();
+    struct proc *p = c->proc;
     if (!p) return;
+    acquire_proc_lock();
+
     proc_close_fds(p);
+    printf("proc: %d, code: %d\r\n", p->pid, status);
+
     p->exit_code = status;
     p->state = PROC_ZOMBIE;
-    mycpu()->proc = 0;
-    scheduler();
+
+    c->proc = 0;
+    swtch(&p->context, c->scheduler_ctx);
+
+    panic("SYS_EXIT: RETURNED");
 }
 
 static i64 sys_open(const char *path, u64 flags) {
