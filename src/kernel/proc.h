@@ -2,6 +2,7 @@
 #include "types.h"
 #include "spinlock.h"
 #include "vfs.h"
+#include "idt.h"
 
 #define MAX_PROCS    64
 #define KSTACK_SIZE  (4096 * 2)  // 8KB kernel stack
@@ -28,8 +29,6 @@ struct context {
     u64 rip;
 };
 
-struct trap_frame;
-
 struct proc {
     u32 pid;
     u32 ppid;               // parent pid
@@ -37,8 +36,8 @@ struct proc {
     i32 exit_code;          // set on exit, read by wait()
     u64 *pml4;              // page table (virtual address)
     u8  *kstack;            // kernel stack base (virtual)
-    struct trap_frame *tf;  // trap frame on kernel stack
     struct context *context;
+    struct trap_frame tf;   // trap frame (stored in-proc)
     u64 brk;                // current heap break (user VA)
     char name[16];
     struct vfs_file *files[MAX_FDS]; // open file descriptors

@@ -14,7 +14,7 @@ void init_syscall(void) {
     u64 efer = rdmsr(MSR_EFER);
     wrmsr(MSR_EFER, efer | EFER_SCE);
 
-    u64 star = ((u64)0x30 << 48) | ((u64)KERNEL_CS << 32);
+    u64 star = ((u64)0x33 << 48) | ((u64)KERNEL_CS << 32);
     wrmsr(MSR_STAR, star);
 
     wrmsr(MSR_LSTAR, (u64)syscall_entry);
@@ -27,17 +27,14 @@ static int valid_user_ptr(const void *p) { return (u64)p < USER_PTR_MAX; }
 
 /* ---- syscall implementations ---- */
 
-static void sys_exit(void) {
+static void sys_exit(i32 status) {
     struct proc *p = mycpu()->proc;
     if (!p) return;
-    klog("PROC", "pid %u exited", p->pid);
     proc_close_fds(p);
-    acquire_proc_lock();
-    p->exit_code = 0;
-    p->state = PROC_ZOMBIE;   /* parent must wait() to reap */
-    struct context **ctx = cpu_context_ptr();
-    swtch(&p->context, *ctx);
-    release_proc_lock(); /* never reached */
+    p->exit_code = status;
+    p->state = PROC_ZOMBIE;
+    mycpu()->proc = 0;
+    scheduler();
 }
 
 static i64 sys_open(const char *path, u64 flags) {
@@ -244,9 +241,14 @@ static i64 sys_fbinfo(struct fb_info *info) {
 /* Called from syscall_entry.S
    Argument order: rdi=num, rsi=a1, rdx=a2, r10=a3, r8=a4, r9=a5 */
 i64 syscall_handler(u64 num, u64 a1, u64 a2, u64 a3, u64 a4, u64 a5) {
+    if (num == SYS_EXIT) {
+        puts("EXIT ");
+        sys_exit((i32)a1); 
+        puts("RET ");
+        return 0;
+    }
     (void)a4; (void)a5;
     switch (num) {
-    case SYS_EXIT:   sys_exit(); return 0;
     case SYS_WRITE:  return sys_write(a1, (const void *)a2, a3);
     case SYS_GETPID: return sys_getpid();
     case SYS_EXEC:   return proc_exec((const char *)a1, (const char *const *)a2);

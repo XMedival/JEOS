@@ -5,6 +5,7 @@
 #include "devfs.h"
 #include "ring.h"
 #include "string.h"
+#include "serial.h"
 
 static void ps2_wait_write(void) {
     while (inb(PS2_STATUS_PORT) & PS2_STATUS_INPUT_FULL);
@@ -156,21 +157,38 @@ void mouse_interrupt(void) {
     static u8 mouse_buf[3];
     static u8 mouse_idx = 0;
     
-    mouse_buf[mouse_idx++] = inb(PS2_DATA_PORT);
-    if (mouse_idx == 3) {
-        mouse_idx = 0;
-        if (!(mouse_buf[0] & (1 << 3))) return;
-        
-        i32 dx = (i8)mouse_buf[1];
-        i32 dy = -(i8)mouse_buf[2];
+    u8 data = inb(PS2_DATA_PORT);
+    
+    if (mouse_idx == 0 && !(data & (1 << 3))) {
+        return;
+    }
+    
+    mouse_buf[mouse_idx++] = data;
+        if (mouse_idx == 3) {
+            mouse_idx = 0;
+            if (!(mouse_buf[0] & (1 << 3))) return;
+            
+            i32 dx = (i8)mouse_buf[1];
+            if (mouse_buf[0] & MOUSE_X_OVERFLOW) {
+                dx = 0;
+            } else if (mouse_buf[0] & MOUSE_X_SIGN) {
+                dx |= 0xFFFFFF00;
+            }
+
+            i32 dy = (i8)mouse_buf[2];
+            if (mouse_buf[0] & MOUSE_Y_OVERFLOW) {
+                dy = 0;
+            } else if (mouse_buf[0] & MOUSE_Y_SIGN) {
+                dy |= 0xFFFFFF00;
+            }
+
+        dy = -dy;
+
         u8 buttons = mouse_buf[0] & 0x07;
         
         if (mouse_enabled) {
             mouse_x += dx;
             mouse_y += dy;
-            
-            if (mouse_x < 0) mouse_x = 0;
-            if (mouse_y < 0) mouse_y = 0;
             
             mouse_buttons = buttons;
             
@@ -288,6 +306,16 @@ void ps2_init(void) {
     devfs_register("kbd", VFS_S_IFCHR | 0444, &kbd_ops, 0);
     devfs_register("mouse", VFS_S_IFCHR | 0444, &mouse_ops, 0);
     devfs_register("mousectl", VFS_S_IFCHR | 0666, &mousectl_ops, 0);
+
+    // Send mouse reset command
+    ps2_wait_write();
+    outb(PS2_CMD_PORT, PS2_CMD_WRITE_AUX);
+    ps2_wait_write();
+    outb(PS2_DATA_PORT, PS2_MOUSE_RESET);
+    ps2_wait_read();
+    (void)inb(PS2_DATA_PORT);  // Should be 0xAA (self-test pass)
+    ps2_wait_read();
+    (void)inb(PS2_DATA_PORT);  // Should be 0x00 (mouse ID)
 
     // Send "enable data reporting" to the mouse
     ps2_wait_write();

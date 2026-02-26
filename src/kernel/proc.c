@@ -131,14 +131,17 @@ static i32 elf_load_segments(u64 *pml4, const u8 *elf_buf, u64 elf_size, u64 *en
         }
     }
 
-    /* Map user stack */
-    void *stack = kalloc(1);
-    if (!stack) return -1;
-    memset(stack, 0, PAGE_SIZE);
-    map_page_pml4(pml4, USER_STACK_BASE, VIRT_TO_PHYS((u64)stack),
-                  PTE_USER | PTE_WRITE);
+    /* Map user stack - map pages from BASE up to TOP (inclusive) */
+    for (u64 va = USER_STACK_BASE; va < USER_STACK_TOP + PAGE_SIZE; va += PAGE_SIZE) {
+        void *stack = kalloc(1);
+        if (!stack) return -1;
+        memset(stack, 0, PAGE_SIZE);
+        map_page_pml4(pml4, va, VIRT_TO_PHYS((u64)stack),
+                      PTE_USER | PTE_WRITE);
+    }
 
     *entry_out = ehdr->e_entry;
+    klog("EXEC", "e_entry=%x", ehdr->e_entry);
     return 0;
 }
 
@@ -213,7 +216,8 @@ static u64 setup_user_stack(u64 *pml4, const char *const *argv)
     return USER_STACK_BASE + (u64)((u8 *)sp - kpage);
 }
 
-/* Set up the kernel stack for first scheduling via forkret → trapret. */
+/* Set up the kernel stack for first scheduling via forkret → trapret.
+   Copies from p->tf if already set (for fork), otherwise initializes fresh. */
 static void kstack_setup(struct proc *p, u64 entry, u64 user_rsp)
 {
     extern void trapret(void);
@@ -221,13 +225,18 @@ static void kstack_setup(struct proc *p, u64 entry, u64 user_rsp)
     u8 *sp = p->kstack + KSTACK_SIZE;
 
     sp -= sizeof(struct trap_frame);
-    p->tf = (struct trap_frame *)sp;
-    memset(p->tf, 0, sizeof(struct trap_frame));
-    p->tf->cs     = USER_CS;
-    p->tf->ss     = USER_DS;
-    p->tf->rip    = entry;
-    p->tf->rsp    = user_rsp;
-    p->tf->rflags = 0x202;  /* IF=1 */
+    struct trap_frame *tf_on_stack = (struct trap_frame *)sp;
+
+    if (p->state == PROC_RUNNABLE && p->tf.rip != 0) {
+        memcpy(tf_on_stack, &p->tf, sizeof(struct trap_frame));
+    } else {
+        memset(tf_on_stack, 0, sizeof(struct trap_frame));
+        tf_on_stack->cs     = USER_CS;
+        tf_on_stack->ss     = USER_DS;
+        tf_on_stack->rip    = entry;
+        tf_on_stack->rsp    = user_rsp;
+        tf_on_stack->rflags = 0x202;  /* IF=1 */
+    }
 
     sp -= sizeof(u64);
     *(u64 *)sp = (u64)trapret;
@@ -316,30 +325,29 @@ struct proc *proc_create(const char *path)
      kstop-56:  r13    kstop-64:  r14    kstop-72:  r15
      kstop-80:  rdi    kstop-88:  rsi    kstop-96:  rdx
      kstop-104: r10    kstop-112: r8     kstop-120: r9           */
-static void build_fork_tf(struct trap_frame *tf, const u8 *parent_kstack)
+static void build_fork_tf(struct trap_frame *dst, const struct trap_frame *src)
 {
-    u64 kstop = (u64)parent_kstack + KSTACK_SIZE;
-    memset(tf, 0, sizeof(*tf));
-    tf->rsp    = *(u64 *)(kstop -   8);
-    tf->rip    = *(u64 *)(kstop -  16);
-    tf->rcx    = tf->rip;               /* rcx = user RIP after syscall */
-    tf->rflags = *(u64 *)(kstop -  24);
-    tf->r11    = tf->rflags;
-    tf->rbx    = *(u64 *)(kstop -  32);
-    tf->rbp    = *(u64 *)(kstop -  40);
-    tf->r12    = *(u64 *)(kstop -  48);
-    tf->r13    = *(u64 *)(kstop -  56);
-    tf->r14    = *(u64 *)(kstop -  64);
-    tf->r15    = *(u64 *)(kstop -  72);
-    tf->rdi    = *(u64 *)(kstop -  80);
-    tf->rsi    = *(u64 *)(kstop -  88);
-    tf->rdx    = *(u64 *)(kstop -  96);
-    tf->r10    = *(u64 *)(kstop - 104);
-    tf->r8     = *(u64 *)(kstop - 112);
-    tf->r9     = *(u64 *)(kstop - 120);
-    tf->cs     = USER_CS;
-    tf->ss     = USER_DS;
-    tf->rax    = 0;   /* fork() returns 0 in child */
+    memset(dst, 0, sizeof(*dst));
+    dst->rsp    = src->rsp;
+    dst->rip    = src->rip;
+    dst->rcx    = src->rip;
+    dst->rflags = src->rflags;
+    dst->r11    = src->rflags;
+    dst->rbx    = src->rbx;
+    dst->rbp    = src->rbp;
+    dst->r12    = src->r12;
+    dst->r13    = src->r13;
+    dst->r14    = src->r14;
+    dst->r15    = src->r15;
+    dst->rdi    = src->rdi;
+    dst->rsi    = src->rsi;
+    dst->rdx    = src->rdx;
+    dst->r10    = src->r10;
+    dst->r8     = src->r8;
+    dst->r9     = src->r9;
+    dst->cs     = USER_CS;
+    dst->ss     = USER_DS;
+    dst->rax    = 0;   /* fork() returns 0 in child */
 }
 
 /* ---- proc_fork ---- */
@@ -358,9 +366,9 @@ i32 proc_fork(void)
     copy_user_pml4(child->pml4, parent->pml4);
 
     /* Build child's kernel stack for forkret → trapret → iretq path.
-       Extract the parent's current user register state from the syscall frame. */
-    kstack_setup(child, 0 /* dummy, overwritten below */, 0);
-    build_fork_tf(child->tf, parent->kstack);
+       Copy parent's user register state from parent->tf (embedded in proc). */
+    kstack_setup(child, 0, 0);
+    build_fork_tf(&child->tf, &parent->tf);
 
     /* Inherit fd table — share the same vfs_file objects (refcounted) */
     for (int i = 0; i < MAX_FDS; i++) {
@@ -391,23 +399,54 @@ i32 proc_exec(const char *path, const char *const *argv)
 
     u32 elf_pages = 0;
     u8 *elf_buf = read_elf(path, &elf_pages);
-    if (!elf_buf) return -1;
+    if (!elf_buf) { klog("EXEC", "read_elf failed for %s", path); return -1; }
+    klog("EXEC", "read_elf ok, %u pages", elf_pages);
 
     /* Build new address space before tearing down the old one */
     u64 *new_pml4 = create_user_pml4();
-    if (!new_pml4) { kfree(elf_buf, elf_pages); return -1; }
+    if (!new_pml4) { kfree(elf_buf, elf_pages); klog("EXEC", "create_user_pml4 failed"); return -1; }
+    klog("EXEC", "create_user_pml4 ok");
 
     u64 entry = 0;
     if (elf_load_segments(new_pml4, elf_buf, (u64)elf_pages * PAGE_SIZE, &entry) != 0) {
         free_user_pml4(new_pml4);
         kfree(new_pml4, 1);
         kfree(elf_buf, elf_pages);
+        klog("EXEC", "elf_load_segments failed");
         return -1;
     }
+    klog("EXEC", "elf_load_segments ok, entry=%x", entry);
     kfree(elf_buf, elf_pages);
 
     /* Set up argc/argv on the user stack */
     u64 user_rsp = setup_user_stack(new_pml4, argv);
+    klog("EXEC", "setup_user_stack ok, rsp=%x", user_rsp);
+
+    /* Reset heap break (can be done before or after lcr3) */
+    p->brk = USER_HEAP_BASE;
+    klog("EXEC", "brk reset");
+
+    /* Redirect the pending sysret to the new entry point.
+       syscall_entry saved user RIP at kstop-16 and user RSP at kstop-8.
+       After proc_exec returns through syscall_handler → syscall_entry,
+       those values are restored and sysret jumps to the new entry.
+
+       IMPORTANT: This MUST be done BEFORE lcr3 switches to the new address space,
+       because p->kstack is a kernel virtual address that may not be accessible
+       in the new user page tables (which only have the kernel half mapped). */
+    u64 kstop = (u64)p->kstack + KSTACK_SIZE;
+    *(u64 *)(kstop -   8) = user_rsp;  /* new user RSP */
+    *(u64 *)(kstop -  16) = entry;     /* new user RIP */
+    *(u64 *)(kstop -  24) = 0x202;     /* new user RFLAGS: IF=1 */
+    klog("EXEC", "kstack patched, entry=%x rsp=%x", entry, user_rsp);
+
+    /* Update p->tf for fork()-after-exec() consistency */
+    p->tf.rip = entry;
+    p->tf.rsp = user_rsp;
+    p->tf.rflags = 0x202;
+    p->tf.cs = USER_CS;
+    p->tf.ss = USER_DS;
+    klog("EXEC", "p->tf updated");
 
     /* Tear down old address space and switch */
     u64 *old_pml4 = p->pml4;
@@ -415,24 +454,7 @@ i32 proc_exec(const char *path, const char *const *argv)
     free_user_pml4(old_pml4);
     kfree(old_pml4, 1);
     lcr3(VIRT_TO_PHYS((u64)new_pml4));
-
-    /* Reset heap break */
-    p->brk = USER_HEAP_BASE;
-
-    /* Redirect the pending sysret to the new entry point.
-       syscall_entry saved user RIP at kstop-16 and user RSP at kstop-8.
-       After proc_exec returns through syscall_handler → syscall_entry,
-       those values are restored and sysret jumps to the new entry. */
-    u64 kstop = (u64)p->kstack + KSTACK_SIZE;
-    *(u64 *)(kstop -   8) = user_rsp;  /* new user RSP */
-    *(u64 *)(kstop -  16) = entry;     /* new user RIP */
-    *(u64 *)(kstop -  24) = 0x202;     /* new user RFLAGS: IF=1 */
-    /* Clear saved GPRs so exec starts with a clean register state */
-    for (int i = 32; i <= 120; i += 8)
-        *(u64 *)(kstop - i) = 0;
-
-    /* Also update p->tf for fork()-after-exec() consistency */
-    kstack_setup(p, entry, user_rsp);
+    klog("EXEC", "lcr3 done");
 
     /* Update name */
     const char *name = path;
@@ -442,6 +464,7 @@ i32 proc_exec(const char *path, const char *const *argv)
     p->name[j] = 0;
 
     /* Return 0 — sysret uses the patched saved values above */
+    klog("EXEC", "returning 0");
     return 0;
 }
 

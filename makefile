@@ -139,6 +139,7 @@ run: iso
 
 debug: iso
 	qemu-system-x86_64 -cdrom $(ISO) -serial stdio -m 3G \
+		-drive file=$(FS_IMG),format=raw,if=ide,index=0 \
 		-no-reboot -no-shutdown \
 		-d int,cpu_reset -D /tmp/qemu.log \
 		-s -S &
