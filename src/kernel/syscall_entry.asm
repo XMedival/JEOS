@@ -9,6 +9,9 @@ syscall_entry:
     ;   RDI,RSI,RDX,R10,R8,R9 = args 1-6
     ;   Interrupts are masked (FMASK cleared IF)
 
+    ; Save syscall number early (we'll clobber RAX later)
+    mov r12, rax                ; r12 = syscall number
+
     ; Swap to kernel GS (per-CPU struct)
     swapgs
 
@@ -20,14 +23,15 @@ syscall_entry:
     push qword [gs:8]           ; user RSP
     push rcx                    ; user RIP
     push r11                    ; user RFLAGS
+
     push rbx
     push rbp
-    push r12
+    push r12                    ; NOTE: we pushed syscall number copy, not user r12
     push r13
     push r14
     push r15
 
-    ; Save argument registers (caller-saved, user expects preserved)
+    ; Save argument registers (caller-saved)
     push rdi
     push rsi
     push rdx
@@ -39,67 +43,101 @@ syscall_entry:
     ; 120 % 16 = 8, so RSP is 8 mod 16. Need sub 8 for alignment.
     sub rsp, 8
 
+    ; Stack layout at this point (rsp points to alignment padding):
+    ;   rsp+8:   r9     rsp+16:  r8     rsp+24:  r10
+    ;   rsp+32:  rdx    rsp+40:  rsi    rsp+48:  rdi
+    ;   rsp+56:  r15    rsp+64:  r14    rsp+72:  r13
+    ;   rsp+80:  r12(*) rsp+88:  rbp    rsp+96:  rbx
+    ;   rsp+104: r11    rsp+112: rcx(user RIP)  rsp+120: user_rsp
+    ; (*) r12 here is our saved syscall-number copy (not user r12)
+
     ; Save registers to current_proc->tf for fork() to use
     ; proc struct layout: pid,ppid,state,exit_code,pml4,kstack,context,tf,brk,name,files
-    ; tf is at offset 40 in struct proc
-    ; Stack layout at this point (rsp points to alignment padding):
-    ;   rsp+8:   r9    rsp+16:  r8    rsp+24:  r10
-    ;   rsp+32:  rdx   rsp+40:  rsi   rsp+48:  rdi
-    ;   rsp+56:  r15   rsp+64:  r14   rsp+72:  r13
-    ;   rsp+80:  r12   rsp+88:  rbp   rsp+96:  rbx
-    ;   rsp+104: r11   rsp+112: rcx   rsp+120: user_rsp
-    mov rax, [gs:16]            ; rax = cpu->proc (current_proc)
-    test rax, rax
+    ; tf is embedded at offset 40 in struct proc
+    mov rbx, [gs:16]            ; rbx = cpu->proc (current_proc)
+    test rbx, rbx
     jz .skip_tf_save
-    ; trap_frame layout: r15,r14,r13,r12,r11,r10,r9,r8, rbp,rdi,rsi,rdx,rcx,rbx,rax, int_no,err, rip,cs,rflags,rsp,ss
-    mov rbx, [rsp+56]
-    mov [rax + 40], rbx         ; tf->r15
-    mov rbx, [rsp+64]
-    mov [rax + 48], rbx         ; tf->r14
-    mov rbx, [rsp+72]
-    mov [rax + 56], rbx         ; tf->r13
-    mov rbx, [rsp+80]
-    mov [rax + 64], rbx         ; tf->r12
-    mov rbx, [rsp+104]
-    mov [rax + 72], rbx         ; tf->r11
-    mov rbx, [rsp+24]
-    mov [rax + 80], rbx         ; tf->r10
-    mov rbx, [rsp+8]
-    mov [rax + 88], rbx         ; tf->r9
-    mov rbx, [rsp+16]
-    mov [rax + 96], rbx         ; tf->r8
-    mov rbx, [rsp+88]
-    mov [rax + 104], rbx        ; tf->rbp
-    mov rbx, [rsp+48]
-    mov [rax + 112], rbx        ; tf->rdi
-    mov rbx, [rsp+40]
-    mov [rax + 120], rbx        ; tf->rsi
-    mov rbx, [rsp+32]
-    mov [rax + 128], rbx        ; tf->rdx
-    mov rbx, [rsp+112]
-    mov [rax + 136], rbx        ; tf->rcx (user RIP)
-    mov rbx, [rsp+96]
-    mov [rax + 144], rbx        ; tf->rbx
-    mov [rax + 160], rbx        ; tf->rip
-    mov rbx, 0x20
-    mov [rax + 168], rbx        ; tf->cs = USER_CS
-    mov rbx, [rsp+104]
-    mov [rax + 176], rbx        ; tf->rflags
-    mov rbx, [rsp+120]
-    mov [rax + 184], rbx        ; tf->rsp (user RSP)
-    mov rbx, 0x28
-    mov [rax + 192], rbx        ; tf->ss = USER_DS
+
+    lea rax, [rbx + 40]         ; rax = &current_proc->tf (trap_frame base)
+
+    ; trap_frame layout:
+    ; r15,r14,r13,r12,r11,r10,r9,r8, rbp,rdi,rsi,rdx,rcx,rbx,rax, int_no,err, rip,cs,rflags,rsp,ss
+
+    ; General regs from our stack frame
+    mov rdx, [rsp+56]
+    mov [rax + 0],  rdx         ; tf->r15
+    mov rdx, [rsp+64]
+    mov [rax + 8],  rdx         ; tf->r14
+    mov rdx, [rsp+72]
+    mov [rax + 16], rdx         ; tf->r13
+    mov rdx, [rsp+80]
+    mov [rax + 24], rdx         ; tf->r12  (this is our saved syscall-number copy)
+    mov rdx, [rsp+104]
+    mov [rax + 32], rdx         ; tf->r11  (user RFLAGS from SYSCALL)
+
+    mov rdx, [rsp+24]
+    mov [rax + 40], rdx         ; tf->r10
+    mov rdx, [rsp+8]
+    mov [rax + 48], rdx         ; tf->r9
+    mov rdx, [rsp+16]
+    mov [rax + 56], rdx         ; tf->r8
+
+    mov rdx, [rsp+88]
+    mov [rax + 64], rdx         ; tf->rbp
+    mov rdx, [rsp+48]
+    mov [rax + 72], rdx         ; tf->rdi
+    mov rdx, [rsp+40]
+    mov [rax + 80], rdx         ; tf->rsi
+    mov rdx, [rsp+32]
+    mov [rax + 88], rdx         ; tf->rdx
+
+    ; We do NOT have the user's original RCX (SYSCALL clobbers it with user RIP).
+    ; Store user RIP in tf->rcx (as your code intended) and also in tf->rip.
+    mov rdx, [rsp+112]
+    mov [rax + 96],  rdx        ; tf->rcx = user RIP (convention in this kernel)
+    mov rdx, [rsp+96]
+    mov [rax + 104], rdx        ; tf->rbx
+
+    ; tf->rax: store the syscall number we saved in r12 (pre-handler)
+    mov rdx, r12
+    mov [rax + 112], rdx        ; tf->rax = syscall number (pre-handler snapshot)
+
+    ; int_no / error_code: syscall path doesn't have them
+    xor edx, edx
+    mov [rax + 120], rdx        ; tf->int_no = 0
+    mov [rax + 128], rdx        ; tf->error_code = 0
+
+    ; Return frame for iret/sysret-style semantics
+    mov rdx, [rsp+112]
+    mov [rax + 136], rdx        ; tf->rip = user RIP
+
+    mov rdx, 0x20
+    mov [rax + 144], rdx        ; tf->cs = USER_CS
+
+    mov rdx, [rsp+104]
+    mov [rax + 152], rdx        ; tf->rflags = user RFLAGS
+
+    mov rdx, [rsp+120]
+    mov [rax + 160], rdx        ; tf->rsp = user RSP
+
+    mov rdx, 0x28
+    mov [rax + 168], rdx        ; tf->ss = USER_DS
+
 .skip_tf_save:
 
     ; Map syscall convention to C calling convention:
-    ;   syscall: RAX=num, RDI=a1, RSI=a2, RDX=a3, R10=a4, R8=a5
+    ;   syscall: RAX=num, RDI=a1, RSI=a2, RDX=a3, R10=a4, R8=a5, R9=a6
     ;   C call:  RDI=num, RSI=a1, RDX=a2, RCX=a3, R8=a4, R9=a5
-    mov r9, r8                  ; a5 -> r9
-    mov r8, r10                 ; a4 -> r8
-    mov rcx, r10                ; a3 -> rcx (R10 holds a3!)
+    ;
+    ; We ignore a6 (syscall r9) because the C prototype you documented only takes 6 total
+    ; params (num + 5 args).
+
+    mov r9,  r8                 ; a5 -> r9
+    mov r8,  r10                ; a4 -> r8
+    mov rcx, rdx                ; a3 -> rcx
     mov rdx, rsi                ; a2 -> rdx
     mov rsi, rdi                ; a1 -> rsi
-    mov rdi, rax                ; num -> rdi
+    mov rdi, r12                ; num -> rdi (from saved syscall number)
 
     call syscall_handler
     ; RAX = return value
@@ -124,7 +162,7 @@ syscall_entry:
 
     pop r11                     ; user RFLAGS
     pop rcx                     ; user RIP
-    mov rsp, [rsp]              ; restore user RSP
+    mov rsp, [rsp]              ; restore user RSP (top qword is the saved user_rsp)
 
     ; Swap back to user GS
     swapgs

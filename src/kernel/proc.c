@@ -3,6 +3,7 @@
 #include "gdt.h"
 #include "idt.h"
 #include "mem.h"
+#include "panic.h"
 #include "vfs.h"
 #include "print.h"
 #include "syscall.h"
@@ -141,7 +142,7 @@ static i32 elf_load_segments(u64 *pml4, const u8 *elf_buf, u64 elf_size, u64 *en
     }
 
     *entry_out = ehdr->e_entry;
-    klog("EXEC", "e_entry=%x", ehdr->e_entry);
+    // klog("EXEC", "e_entry=%x", ehdr->e_entry);
     return 0;
 }
 
@@ -227,7 +228,7 @@ static void kstack_setup(struct proc *p, u64 entry, u64 user_rsp)
     sp -= sizeof(struct trap_frame);
     struct trap_frame *tf_on_stack = (struct trap_frame *)sp;
 
-    if (p->state == PROC_RUNNABLE && p->tf.rip != 0) {
+    if (p->tf.rip != 0) {
         memcpy(tf_on_stack, &p->tf, sizeof(struct trap_frame));
     } else {
         memset(tf_on_stack, 0, sizeof(struct trap_frame));
@@ -367,8 +368,8 @@ i32 proc_fork(void)
 
     /* Build child's kernel stack for forkret → trapret → iretq path.
        Copy parent's user register state from parent->tf (embedded in proc). */
-    kstack_setup(child, 0, 0);
     build_fork_tf(&child->tf, &parent->tf);
+    kstack_setup(child, 0, 0);
 
     /* Inherit fd table — share the same vfs_file objects (refcounted) */
     for (int i = 0; i < MAX_FDS; i++) {
@@ -400,12 +401,12 @@ i32 proc_exec(const char *path, const char *const *argv)
     u32 elf_pages = 0;
     u8 *elf_buf = read_elf(path, &elf_pages);
     if (!elf_buf) { klog("EXEC", "read_elf failed for %s", path); return -1; }
-    klog("EXEC", "read_elf ok, %u pages", elf_pages);
+    // klog("EXEC", "read_elf ok, %u pages", elf_pages);
 
     /* Build new address space before tearing down the old one */
     u64 *new_pml4 = create_user_pml4();
     if (!new_pml4) { kfree(elf_buf, elf_pages); klog("EXEC", "create_user_pml4 failed"); return -1; }
-    klog("EXEC", "create_user_pml4 ok");
+    // klog("EXEC", "create_user_pml4 ok");
 
     u64 entry = 0;
     if (elf_load_segments(new_pml4, elf_buf, (u64)elf_pages * PAGE_SIZE, &entry) != 0) {
@@ -415,16 +416,16 @@ i32 proc_exec(const char *path, const char *const *argv)
         klog("EXEC", "elf_load_segments failed");
         return -1;
     }
-    klog("EXEC", "elf_load_segments ok, entry=%x", entry);
+    // klog("EXEC", "elf_load_segments ok, entry=%x", entry);
     kfree(elf_buf, elf_pages);
 
     /* Set up argc/argv on the user stack */
     u64 user_rsp = setup_user_stack(new_pml4, argv);
-    klog("EXEC", "setup_user_stack ok, rsp=%x", user_rsp);
+    // klog("EXEC", "setup_user_stack ok, rsp=%x", user_rsp);
 
     /* Reset heap break (can be done before or after lcr3) */
     p->brk = USER_HEAP_BASE;
-    klog("EXEC", "brk reset");
+    // klog("EXEC", "brk reset");
 
     /* Redirect the pending sysret to the new entry point.
        syscall_entry saved user RIP at kstop-16 and user RSP at kstop-8.
@@ -438,7 +439,7 @@ i32 proc_exec(const char *path, const char *const *argv)
     *(u64 *)(kstop -   8) = user_rsp;  /* new user RSP */
     *(u64 *)(kstop -  16) = entry;     /* new user RIP */
     *(u64 *)(kstop -  24) = 0x202;     /* new user RFLAGS: IF=1 */
-    klog("EXEC", "kstack patched, entry=%x rsp=%x", entry, user_rsp);
+    // klog("EXEC", "kstack patched, entry=%x rsp=%x", entry, user_rsp);
 
     /* Update p->tf for fork()-after-exec() consistency */
     p->tf.rip = entry;
@@ -446,7 +447,7 @@ i32 proc_exec(const char *path, const char *const *argv)
     p->tf.rflags = 0x202;
     p->tf.cs = USER_CS;
     p->tf.ss = USER_DS;
-    klog("EXEC", "p->tf updated");
+    // klog("EXEC", "p->tf updated");
 
     /* Tear down old address space and switch */
     u64 *old_pml4 = p->pml4;
@@ -454,7 +455,7 @@ i32 proc_exec(const char *path, const char *const *argv)
     free_user_pml4(old_pml4);
     kfree(old_pml4, 1);
     lcr3(VIRT_TO_PHYS((u64)new_pml4));
-    klog("EXEC", "lcr3 done");
+    // klog("EXEC", "lcr3 done");
 
     /* Update name */
     const char *name = path;
@@ -464,7 +465,7 @@ i32 proc_exec(const char *path, const char *const *argv)
     p->name[j] = 0;
 
     /* Return 0 — sysret uses the patched saved values above */
-    klog("EXEC", "returning 0");
+    // klog("EXEC", "returning 0");
     return 0;
 }
 
