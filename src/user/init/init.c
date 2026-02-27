@@ -3,6 +3,7 @@
 static char *path = "/bin/jesh";
 
 void _start() {
+    write(1, "init.c\n", 7);
     while (1) {
         int pid = fork();
         if (pid == 0) {

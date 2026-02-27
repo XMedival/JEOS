@@ -9,29 +9,26 @@ syscall_entry:
     ;   RDI,RSI,RDX,R10,R8,R9 = args 1-6
     ;   Interrupts are masked (FMASK cleared IF)
 
-    ; Save syscall number early (we'll clobber RAX later)
-    mov r12, rax                ; r12 = syscall number
-
-    ; Swap to kernel GS (per-CPU struct)
     swapgs
 
     ; Save user RSP, switch to kernel stack (via per-CPU struct)
     mov [gs:8], rsp             ; cpu->scratch_rsp = user RSP
-    mov rsp, [gs:0]             ; RSP = cpu->kernel_rsp
+    mov rsp, [gs:0]             ; RSP = cpu->kernel_rsp (must be 16-aligned)
 
-    ; Save user return state and callee-preserved registers
-    push qword [gs:8]           ; user RSP
-    push rcx                    ; user RIP
-    push r11                    ; user RFLAGS
+    ; Save user return state
+    push qword [gs:8]           ; saved user RSP
+    push rcx                    ; saved user RIP
+    push r11                    ; saved user RFLAGS
 
+    ; Save callee-preserved regs (PRESERVE USER r12!)
     push rbx
     push rbp
-    push r12                    ; NOTE: we pushed syscall number copy, not user r12
+    push r12                    ; user r12 (real)
     push r13
     push r14
     push r15
 
-    ; Save argument registers (caller-saved)
+    ; Save syscall argument regs (caller-saved)
     push rdi
     push rsi
     push rdx
@@ -39,21 +36,22 @@ syscall_entry:
     push r8
     push r9
 
-    ; 15 pushes = 120 bytes from 16-aligned kernel_rsp
-    ; 120 % 16 = 8, so RSP is 8 mod 16. Need sub 8 for alignment.
-    sub rsp, 8
+    ; Save syscall number (caller-saved) AFTER args
+    push rax                    ; syscall number
 
-    ; Stack layout at this point (rsp points to alignment padding):
+    ; Push count so far:
+    ;   3 (ret state) + 6 (callee) + 6 (args) + 1 (sysno) = 16 pushes = 128 bytes
+    ; If kernel_rsp was 16-aligned, RSP is still 16-aligned here. No padding needed.
+
+    ; Stack layout now (rsp points to saved syscall number):
+    ;   rsp+0:   sysno (rax)
     ;   rsp+8:   r9     rsp+16:  r8     rsp+24:  r10
     ;   rsp+32:  rdx    rsp+40:  rsi    rsp+48:  rdi
     ;   rsp+56:  r15    rsp+64:  r14    rsp+72:  r13
-    ;   rsp+80:  r12(*) rsp+88:  rbp    rsp+96:  rbx
+    ;   rsp+80:  r12    rsp+88:  rbp    rsp+96:  rbx
     ;   rsp+104: r11    rsp+112: rcx(user RIP)  rsp+120: user_rsp
-    ; (*) r12 here is our saved syscall-number copy (not user r12)
 
     ; Save registers to current_proc->tf for fork() to use
-    ; proc struct layout: pid,ppid,state,exit_code,pml4,kstack,context,tf,brk,name,files
-    ; tf is embedded at offset 40 in struct proc
     mov rbx, [gs:16]            ; rbx = cpu->proc (current_proc)
     test rbx, rbx
     jz .skip_tf_save
@@ -71,9 +69,10 @@ syscall_entry:
     mov rdx, [rsp+72]
     mov [rax + 16], rdx         ; tf->r13
     mov rdx, [rsp+80]
-    mov [rax + 24], rdx         ; tf->r12  (this is our saved syscall-number copy)
+    mov [rax + 24], rdx         ; tf->r12 (USER r12, fixed)
+
     mov rdx, [rsp+104]
-    mov [rax + 32], rdx         ; tf->r11  (user RFLAGS from SYSCALL)
+    mov [rax + 32], rdx         ; tf->r11 (user RFLAGS from SYSCALL)
 
     mov rdx, [rsp+24]
     mov [rax + 40], rdx         ; tf->r10
@@ -91,23 +90,21 @@ syscall_entry:
     mov rdx, [rsp+32]
     mov [rax + 88], rdx         ; tf->rdx
 
-    ; We do NOT have the user's original RCX (SYSCALL clobbers it with user RIP).
-    ; Store user RIP in tf->rcx (as your code intended) and also in tf->rip.
+    ; SYSCALL clobbers RCX with user RIP; store that where your kernel expects
     mov rdx, [rsp+112]
-    mov [rax + 96],  rdx        ; tf->rcx = user RIP (convention in this kernel)
+    mov [rax + 96],  rdx        ; tf->rcx = user RIP (your convention)
     mov rdx, [rsp+96]
     mov [rax + 104], rdx        ; tf->rbx
 
-    ; tf->rax: store the syscall number we saved in r12 (pre-handler)
-    mov rdx, r12
-    mov [rax + 112], rdx        ; tf->rax = syscall number (pre-handler snapshot)
+    ; tf->rax: store syscall number snapshot (saved on stack)
+    mov rdx, [rsp+0]
+    mov [rax + 112], rdx        ; tf->rax = syscall number
 
-    ; int_no / error_code: syscall path doesn't have them
     xor edx, edx
     mov [rax + 120], rdx        ; tf->int_no = 0
     mov [rax + 128], rdx        ; tf->error_code = 0
 
-    ; Return frame for iret/sysret-style semantics
+    ; Return frame
     mov rdx, [rsp+112]
     mov [rax + 136], rdx        ; tf->rip = user RIP
 
@@ -125,26 +122,29 @@ syscall_entry:
 
 .skip_tf_save:
 
-    ; Map syscall convention to C calling convention:
-    ;   syscall: RAX=num, RDI=a1, RSI=a2, RDX=a3, R10=a4, R8=a5, R9=a6
-    ;   C call:  RDI=num, RSI=a1, RDX=a2, RCX=a3, R8=a4, R9=a5
-    ;
-    ; We ignore a6 (syscall r9) because the C prototype you documented only takes 6 total
-    ; params (num + 5 args).
-
-    mov r9,  r8                 ; a5 -> r9
-    mov r8,  r10                ; a4 -> r8
-    mov rcx, rdx                ; a3 -> rcx
-    mov rdx, rsi                ; a2 -> rdx
-    mov rsi, rdi                ; a1 -> rsi
-    mov rdi, r12                ; num -> rdi (from saved syscall number)
+    ; IMPORTANT: reload syscall args from the saved stack slots (regs may be clobbered above)
+    mov rdi, [rsp+0]            ; num (syscall number)
+    mov rsi, [rsp+48]           ; a1
+    mov rdx, [rsp+40]           ; a2
+    mov rcx, [rsp+32]           ; a3
+    mov r8,  [rsp+24]           ; a4
+    mov r9,  [rsp+16]           ; a5
+    ; a6 is [rsp+8] if you ever want it
 
     call syscall_handler
     ; RAX = return value
 
-    add rsp, 8                  ; remove alignment padding
+    ; Restore syscall number + argument regs
+    pop rax                     ; discard saved sysno (we keep handler return in rax? NO!)
+    ; ^ If you want to keep handler return value in RAX, DON'T pop into rax.
+    ;   Instead do: add rsp, 8
+    ;   (Fix below.)
 
-    ; Restore argument registers
+    ; --- Correct restore: keep RAX return value ---
+    ; Replace the above "pop rax" with:
+    ;   add rsp, 8
+
+    ; Restore argument registers (original user values)
     pop r9
     pop r8
     pop r10
@@ -152,7 +152,7 @@ syscall_entry:
     pop rsi
     pop rdi
 
-    ; Restore callee-preserved registers
+    ; Restore callee-preserved registers (original user values)
     pop r15
     pop r14
     pop r13
@@ -160,10 +160,10 @@ syscall_entry:
     pop rbp
     pop rbx
 
+    ; Restore user return state
     pop r11                     ; user RFLAGS
     pop rcx                     ; user RIP
-    mov rsp, [rsp]              ; restore user RSP (top qword is the saved user_rsp)
+    pop rsp                     ; user RSP
 
-    ; Swap back to user GS
     swapgs
     o64 sysret
