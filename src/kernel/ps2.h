@@ -5,6 +5,7 @@
 #define PS2_DATA_PORT      0x60  // Data port (read/write)
 #define PS2_STATUS_PORT    0x64  // Status register (read)
 #define PS2_CMD_PORT       0x64  // Command register (write)
+#define PS2_STATUS_AUX     0x20
 
 // PS/2 Status Register bits
 #define PS2_STATUS_OUTPUT_FULL  (1 << 0)  // Output buffer full (data available)

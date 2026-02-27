@@ -52,7 +52,7 @@ void proc_close_fds(struct proc *p)
 static void proc_init_fds(struct proc *p)
 {
     struct vfs_file *f = 0;
-    if (vfs_open("/dev/null", VFS_O_RDONLY, 0, &f) == VFS_OK)
+    if (vfs_open("/dev/cons", VFS_O_RDONLY, 0, &f) == VFS_OK)
         p->files[0] = f;
 
     f = 0;

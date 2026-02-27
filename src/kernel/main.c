@@ -68,33 +68,33 @@ static volatile u64 ap_started = 0;
 
 void ap_entry(struct limine_mp_info *info) {
     // Find our CPU slot
-    // u32 apic_id = info->lapic_id;
-    // struct cpu *c = 0;
-    // for (u32 i = 0; i < ncpu; i++) {
-    //     if (cpus[i].apic_id == apic_id) {
-    //         c = &cpus[i];
-    //         break;
-    //     }
-    // }
-    // if (!c) { cli(); hlt(); }
-    //
-    // // Set GS base before and after GDT init (loading GS=0 clears it)
-    // wrmsr(MSR_GS_BASE, (u64)c);
-    // wrmsr(MSR_KERNEL_GS_BASE, (u64)c);
-    //
-    // init_gdt_ap(c->cpu_id);
-    //
-    // // Restore GS base after GDT reload
-    // wrmsr(MSR_GS_BASE, (u64)c);
-    // wrmsr(MSR_KERNEL_GS_BASE, (u64)c);
-    // load_idt();
-    // lapic_init_ap();
-    // init_syscall();
-    // lapic_timer_periodic(32, 1000000);
-    //
-    // __sync_fetch_and_add(&ap_started, 1);
-    //
-    // scheduler();
+    u32 apic_id = info->lapic_id;
+    struct cpu *c = 0;
+    for (u32 i = 0; i < ncpu; i++) {
+        if (cpus[i].apic_id == apic_id) {
+            c = &cpus[i];
+            break;
+        }
+    }
+    if (!c) { cli(); hlt(); }
+
+    // Set GS base before and after GDT init (loading GS=0 clears it)
+    wrmsr(MSR_GS_BASE, (u64)c);
+    wrmsr(MSR_KERNEL_GS_BASE, (u64)c);
+
+    init_gdt_ap(c->cpu_id);
+
+    // Restore GS base after GDT reload
+    wrmsr(MSR_GS_BASE, (u64)c);
+    wrmsr(MSR_KERNEL_GS_BASE, (u64)c);
+    load_idt();
+    lapic_init_ap();
+    init_syscall();
+    lapic_timer_periodic(32, 1000000);
+
+    __sync_fetch_and_add(&ap_started, 1);
+
+    scheduler();
     for (;;) {
         cli();
         hlt();

@@ -163,15 +163,17 @@ static void kbd_handle_scancode(u8 scancode)
 
 void kbd_interrupt(void)
 {
-    // Opróżnij bufor wyjściowy kontrolera: PS/2 może mieć kilka bajtów na jedno IRQ.
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 64; i++) {
         u8 st = inb(PS2_STATUS_PORT);
         if (!(st & PS2_STATUS_OUTPUT_FULL))
             break;
 
-        // Jeśli kiedyś rozdzielisz mysz/klawę tym samym portem, tu można filtrować AUX.
-        u8 scancode = inb(PS2_DATA_PORT);
-        kbd_handle_scancode(scancode);
+        // Jeśli to bajt myszy, NIE ruszaj go tutaj
+        if (st & PS2_STATUS_AUX)
+            break;
+
+        u8 sc = inb(PS2_DATA_PORT);
+        kbd_handle_scancode(sc);
     }
 }
 
@@ -193,57 +195,61 @@ static void puti(char *buf, int val) {
     buf[i] = '\0';
 }
 
-void mouse_interrupt(void) {
-    static u8 mouse_buf[3];
-    static u8 mouse_idx = 0;
-    
-    u8 data = inb(PS2_DATA_PORT);
-    
-    if (mouse_idx == 0 && !(data & (1 << 3))) {
-        return;
-    }
-    
-    mouse_buf[mouse_idx++] = data;
+void mouse_interrupt(void)
+{
+    for (int i = 0; i < 64; i++) {
+        u8 st = inb(PS2_STATUS_PORT);
+        if (!(st & PS2_STATUS_OUTPUT_FULL))
+            break;
+
+        // Jeśli to bajt klawiatury, NIE ruszaj go tutaj
+        if (!(st & PS2_STATUS_AUX))
+            break;
+
+        u8 data = inb(PS2_DATA_PORT);
+
+        // --- Twoja obecna logika składania pakietu 3B ---
+        static u8 mouse_buf[3];
+        static u8 mouse_idx = 0;
+
+        if (mouse_idx == 0 && !(data & (1 << 3))) {
+            continue;
+        }
+
+        mouse_buf[mouse_idx++] = data;
         if (mouse_idx == 3) {
             mouse_idx = 0;
-            if (!(mouse_buf[0] & (1 << 3))) return;
-            
+            if (!(mouse_buf[0] & (1 << 3))) continue;
+
             i32 dx = (i8)mouse_buf[1];
-            if (mouse_buf[0] & MOUSE_X_OVERFLOW) {
-                dx = 0;
-            } else if (mouse_buf[0] & MOUSE_X_SIGN) {
-                dx |= 0xFFFFFF00;
-            }
+            if (mouse_buf[0] & MOUSE_X_OVERFLOW) dx = 0;
+            else if (mouse_buf[0] & MOUSE_X_SIGN) dx |= 0xFFFFFF00;
 
             i32 dy = (i8)mouse_buf[2];
-            if (mouse_buf[0] & MOUSE_Y_OVERFLOW) {
-                dy = 0;
-            } else if (mouse_buf[0] & MOUSE_Y_SIGN) {
-                dy |= 0xFFFFFF00;
+            if (mouse_buf[0] & MOUSE_Y_OVERFLOW) dy = 0;
+            else if (mouse_buf[0] & MOUSE_Y_SIGN) dy |= 0xFFFFFF00;
+
+            dy = -dy;
+
+            u8 buttons = mouse_buf[0] & 0x07;
+
+            if (mouse_enabled) {
+                mouse_x += dx;
+                mouse_y += dy;
+                mouse_buttons = buttons;
+
+                char buf[48];
+                char *p = buf;
+                *p++ = 'm';
+                *p++ = ' ';
+                puti(p, dx); p += kstrlen(p);
+                *p++ = ' ';
+                puti(p, dy); p += kstrlen(p);
+                *p++ = ' ';
+                puti(p, buttons); p += kstrlen(p);
+                *p++ = '\n';
+                ring_write(&mouse_ring_buf, buf, (u32)(p - buf));
             }
-
-        dy = -dy;
-
-        u8 buttons = mouse_buf[0] & 0x07;
-        
-        if (mouse_enabled) {
-            mouse_x += dx;
-            mouse_y += dy;
-            
-            mouse_buttons = buttons;
-            
-            char buf[48];
-            char *p = buf;
-            *p++ = 'm';
-            *p++ = ' ';
-            puti(p, dx); p += kstrlen(p);
-            *p++ = ' ';
-            puti(p, dy); p += kstrlen(p);
-            *p++ = ' ';
-            puti(p, buttons); p += kstrlen(p);
-            *p++ = '\n';
-            
-            ring_write(&mouse_ring_buf, buf, p - buf);
         }
     }
 }
